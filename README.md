@@ -1,72 +1,255 @@
-# Approximate Nearest Neighbor (ANN) VectorStore
+# Approximate Nearest Neighbor VectorStore
 
 ## Overview
 
-This project implements a prototype Approximate Nearest Neighbor (ANN) search structure based on a layered graph approach inspired by hierarchical navigable small world (HNSW)-style methods.
+This project implements a prototype **Approximate Nearest Neighbor (ANN)** data structure using a **layered graph**. The design is clearly inspired by hierarchical graph-based ANN methods such as HNSW, but the goal here is not to build a production-grade library. Instead, the point is to show understanding of the main ANN ideas and to provide a readable implementation that can be tested, modified, and studied.
 
-The goal of this project is not to produce a production-optimized ANN system, but rather to:
+In particular, the project is meant to demonstrate:
 
-- Demonstrate understanding of ANN design principles  
-- Explore tradeoffs between accuracy (recall), speed, and graph structure  
-- Provide a clean, readable implementation suitable for experimentation and extension  
+- how a multi-level graph can accelerate nearest-neighbor search
+- how search quality depends on graph density and candidate-pool size
+- how design choices affect the tradeoff between speed and recall
+- how one might keep a graph navigable even when disconnected components appear during construction
 
----
-
-## Design Philosophy
-
-### 1. Layered Graph Structure
-Each vector is assigned a random level (via a geometric distribution), producing a multi-layer graph:
-
-- Higher layers: sparse, long-range connections (fast navigation)
-- Lower layers: dense, local connections (accurate refinement)
+The code supports both **cosine similarity** and **Euclidean distance**, allows **batch construction** and **incremental insertion**, and includes explicit machinery for **component analysis and reconnection**.
 
 ---
 
-### 2. Metric Abstraction
-The system supports two similarity measures:
+## Main Design Choices
 
-- Cosine similarity
-- Euclidean distance
+### 1. Layered graph structure
 
-Euclidean distance is internally converted to a similarity score (negative distance), and results are returned in natural units.
+Each stored vector is wrapped in a `VectorNode` object. A node stores:
 
----
+- its numeric vector
+- associated payload data
+- optional source metadata
+- an integer node id
+- a maximum layer value
+- the norm of the vector
 
-### 3. Controlled Graph Connectivity
-Each node maintains a bounded number of neighbors:
+The `VectorStore` organizes these nodes into a dictionary of adjacency lists, one graph per layer.
 
-- neighbors_upper: connections in higher layers  
-- neighbors_bottom: connections in base layer  
+The central ANN idea is that not every point participates in every layer. Nodes are assigned a level using a **geometric distribution**:
 
-Candidate neighbors are selected using a greedy expansion + pruning strategy:
-- Explore a candidate pool (pool_factor × neighbors)
-- Retain only the best connections  
+```python
+level = np.random.geometric(p=1/(self.exp_level+1)) - 1
+```
 
----
+Higher levels therefore contain fewer nodes, giving a sparse long-range navigation structure, while lower levels contain many more nodes and provide finer local search.
 
-### 4. Component Repair (Connectivity Guarantee)
-Disconnected components are detected and reconnected using a minimum spanning tree (Kruskal-based), ensuring global navigability.
+The parameter controlling this behavior is:
 
----
+- `exp_level`: controls the expected height of a node
 
-### 5. Entry Points via Medoids
-Top-layer entry points are selected using medoid-like representatives from each component.
+If `max_level` is not supplied, the implementation defaults to:
 
----
+```python
+max_level = 5 * exp_level
+```
 
-### 6. Two Build Modes
-
-- Batch construction (build_vectorstore)  
-- Incremental insertion (add_single_node)  
+so extremely tall nodes are clipped. This keeps the hierarchy from growing too deep while still preserving the intended distributional behavior.
 
 ---
 
-## Usage
+### 2. Metric abstraction
 
-### 1. Creating a VectorStore
+The implementation supports two metrics:
 
+- `'cosine'`
+- `'euclidean'`
+
+Internally, both are handled through a common interface:
+
+- cosine uses the normalized dot product
+- Euclidean distance is converted into a similarity score by storing `-||x-y||`
+
+This allows the search code to always treat “larger is better.” A corresponding `metric_multiplier` is then used when returning final results so that Euclidean values are reported back in ordinary positive distance units.
+
+This is a nice design choice because the traversal logic stays uniform across metrics.
+
+---
+
+### 3. Top-layer setup and entry points
+
+When the store is built in batch mode, the algorithm first identifies the nodes at the highest occupied layer and creates the top graph separately.
+
+That top-layer construction does several important things:
+
+1. it computes pairwise similarities among the top-layer nodes
+2. it connects each node to its best neighbors
+3. it symmetrizes those connections
+4. it identifies weakly connected components
+5. it selects representative entry nodes for search
+
+The entry-point selection is especially important. Rather than forcing a single global entry node, the code chooses **medoid-like representatives** from each top-layer component. If additional entry points are allowed, it spreads them across components in a way that promotes coverage.
+
+This gives the search routine multiple starting points and makes it more robust, especially when the top layer is not fully connected.
+
+---
+
+### 4. Controlled degree by layer
+
+The graph uses separate neighbor budgets for the bottom layer and upper layers:
+
+- `neighbors_bottom`: target degree at layer 0
+- `neighbors_upper`: target degree at layers above 0
+
+This is a sensible ANN design choice:
+
+- the bottom layer is where final refinement happens, so it benefits from a larger neighborhood
+- upper layers are mainly for navigation, so they can remain sparser
+
+During both batch construction and incremental insertion, candidate neighbors are generated and then truncated to the appropriate final size.
+
+---
+
+### 5. Candidate-pool search via `pool_factor`
+
+One of the most important parameters in the whole implementation is:
+
+- `pool_factor`
+
+This parameter controls how aggressively the algorithm explores the current graph before deciding which neighbors to keep.
+
+During insertion, the code does **not** simply connect a new node to the first good node it finds. Instead, it builds a candidate pool by starting from a current best node, pulling in that node’s neighbors, ranking candidates by similarity, and continuing until a size budget is reached.
+
+The candidate-pool budget is:
+
+- `pool_factor * neighbors_upper` on upper layers
+- `pool_factor * neighbors_bottom` on the base layer
+
+After that, the pool is pruned down to the final allowed number of neighbors.
+
+So `pool_factor` governs a major tradeoff:
+
+- larger `pool_factor` -> more exploration, potentially better graph quality and better recall, but higher build/search cost
+- smaller `pool_factor` -> faster operations, but a greater chance of missing strong neighbors
+
+The same idea appears again during query-time search at layer 0, where the algorithm expands a candidate set of size approximately `k * pool_factor`.
+
+If you are benchmarking this project, `pool_factor` is one of the main knobs worth studying.
+
+---
+
+### 6. Batch construction
+
+The intended primary workflow is batch construction via:
+
+```python
+build_vectorstore(doc_list)
+```
+
+This method first converts the raw documents into `VectorNode` objects and then calls `build_from_VectorNodeList`.
+
+The batch build process is roughly:
+
+1. assign node ids and random maximum levels
+2. determine the highest occupied layer
+3. build the top layer
+4. descend layer by layer, adding new nodes at each layer
+5. analyze connected components on every layer
+6. reconnect disconnected components afterward
+
+This top-down build is important because each lower layer inherits the graph from the layer above, and then newly eligible nodes are inserted into that layer.
+
+---
+
+### 7. Incremental insertion
+
+After a store has been built, new vectors can be inserted one at a time using:
+
+```python
+add_single_node(doc)
+```
+
+This method:
+
+- assigns the new node a random level
+- starts from the top-layer entry points
+- greedily descends the structure
+- builds candidate pools at each relevant layer
+- connects the node to selected neighbors
+- possibly updates those neighbors’ adjacency lists
+
+This provides a dynamic-update path, though the most natural mode for experimentation is still batch construction.
+
+---
+
+### 8. Component analysis and graph repair
+
+A particularly interesting part of the implementation is that it does not simply assume each layer is connected.
+
+Instead, it explicitly computes **weakly connected components** of each layer using `weak_component_analysis`.
+
+If a layer has multiple components, the code then tries to reconnect them by:
+
+1. sampling nodes from each component
+2. scoring cross-component candidate edges
+3. building a component-level edge list
+4. selecting reconnection edges with a Kruskal-style MST procedure
+5. adding a limited number of actual inter-component node links
+
+This is a strong design choice for a prototype because it addresses a real ANN issue: a search graph that is locally reasonable can still perform poorly if parts of it are disconnected. Reconnecting components improves navigability without making the graph fully dense.
+
+---
+
+### 9. Greedy top-down query strategy
+
+Search is performed with:
+
+```python
+find_neighbors(doc, k, pool_factor=None)
+```
+
+The query vector is wrapped in a temporary `VectorNode`, and the algorithm proceeds as follows:
+
+1. evaluate the query against the entry points
+2. choose the strongest few entry candidates
+3. greedily descend from upper layers to the bottom layer
+4. at layer 0, expand a candidate set by repeatedly exploring neighbors of the best unexpanded candidate
+5. return the top `k` matches
+
+This is exactly the kind of “coarse-to-fine” behavior that makes layered ANN methods effective.
+
+The optional `pool_factor` argument lets query-time search be broader or narrower than the store default.
+
+---
+
+### 10. Readability and experimentation over heavy optimization
+
+The code is written in a way that prioritizes transparency:
+
+- adjacency lists are ordinary Python dictionaries
+- nodes are explicit Python objects
+- pairwise top-layer computations are done directly with NumPy
+- component repair is implemented in a clear, inspectable way
+
+That means this is well suited for:
+
+- course or portfolio projects
+- experimentation with ANN ideas
+- measuring recall/speed tradeoffs
+- comparing cosine and Euclidean behavior
+- studying the effect of parameters such as `exp_level`, `neighbors_bottom`, `neighbors_upper`, and `pool_factor`
+
+---
+
+## Package Usage
+
+## 1. Import the class
+
+```python
 from layered_graph_ann import VectorStore
+```
 
+---
+
+## 2. Create a `VectorStore`
+
+Example:
+
+```python
 vs = VectorStore(
     exp_level=2,
     neighbors_bottom=16,
@@ -74,40 +257,201 @@ vs = VectorStore(
     metric='cosine',
     pool_factor=5
 )
+```
+
+### Constructor parameters
+
+- `exp_level`  
+  Controls the expected level of a node. Larger values tend to create taller hierarchies.
+
+- `neighbors_bottom`  
+  Number of neighbors to retain at the base layer.
+
+- `neighbors_upper`  
+  Number of neighbors to retain in upper layers.
+
+- `max_level`  
+  Optional cap on layer height. If omitted, the code uses `5 * exp_level`, with a small safeguard to keep it above `exp_level`.
+
+- `metric`  
+  Either `'cosine'` or `'euclidean'`.
+
+- `pool_factor`  
+  Controls the size of insertion and search candidate pools. This is one of the most important quality/speed parameters in the project.
 
 ---
 
-### 2. Preparing Data
+## 3. Prepare the input data
+
+The main build method expects a list of dictionaries. Each dictionary should have at least a vector:
+
+```python
+doc_list = [
+    {'vector': [0.1, 0.2, 0.3], 'data': 'point A'},
+    {'vector': [0.4, 0.5, 0.6], 'data': 'point B'},
+    {'vector': [0.3, 0.1, 0.8], 'data': 'point C', 'source': 'example dataset'}
+]
+```
+
+Supported fields are:
+
+- `vector` (required): numeric array-like object
+- `data` (optional): payload associated with the vector
+- `source` (optional): metadata describing origin
+
+The code converts these into `VectorNode` objects automatically.
+
+---
+
+## 4. Build the vector store
+
+```python
+vs.build_vectorstore(doc_list)
+```
+
+This is the recommended way to initialize the structure from raw data.
+
+After building, the store contains:
+
+- `vs.node_list`: the stored `VectorNode` objects
+- `vs.layered_graph`: adjacency lists by layer
+- `vs.entry_point`: top-layer entry nodes used in search
+- `vs.component_info`: connected-component information by layer
+
+---
+
+## 5. Query the store
+
+To retrieve approximate nearest neighbors:
+
+```python
+query = {'vector': [0.2, 0.15, 0.25]}
+neighbors = vs.find_neighbors(query, k=3)
+```
+
+You may also override the default search breadth:
+
+```python
+neighbors = vs.find_neighbors(query, k=3, pool_factor=10)
+```
+
+This can improve recall at the cost of a slower search.
+
+---
+
+## 6. Read the results
+
+The return value is a list of pairs of the form:
+
+```python
+[
+    [VectorNode(...), score],
+    [VectorNode(...), score],
+    ...
+]
+```
+
+Example:
+
+```python
+for node, score in neighbors:
+    print("id:", node.id)
+    print("score:", score)
+    print("data:", node.data)
+    print("source:", node.source)
+    print()
+```
+
+Interpretation of `score`:
+
+- for cosine similarity, larger scores are better
+- for Euclidean distance, smaller returned values are better
+
+---
+
+## 7. Add a new vector after building
+
+Once the store already exists, you can insert a new document:
+
+```python
+vs.add_single_node({
+    'vector': [0.9, 0.1, 0.2],
+    'data': 'new point',
+    'source': 'streamed input'
+})
+```
+
+This is only valid **after** an initial batch build. The code will raise an exception if you try to use single-node insertion on an empty store.
+
+---
+
+## 8. Inspect the store
+
+A few useful helper methods are available.
+
+### String summary
+
+```python
+print(vs)
+```
+
+This prints basic information such as occupancy, current top level, and metric type.
+
+### Store size
+
+```python
+print(vs.store_size())
+```
+
+### Layer/component information
+
+```python
+vs.vector_store_layer_info()
+```
+
+This prints the number of components and the component sizes at each layer.
+
+---
+
+## 9. Minimal working example
+
+```python
+from layered_graph_ann import VectorStore
 
 doc_list = [
-    {'vector': [0.1, 0.2, 0.3], 'data': "point A"},
-    {'vector': [0.4, 0.5, 0.6], 'data': "point B"},
+    {'vector': [1.0, 0.0], 'data': 'A'},
+    {'vector': [0.9, 0.1], 'data': 'B'},
+    {'vector': [0.0, 1.0], 'data': 'C'},
+    {'vector': [0.1, 0.9], 'data': 'D'}
 ]
 
----
-
-### 3. Building the VectorStore
+vs = VectorStore(
+    exp_level=2,
+    neighbors_bottom=4,
+    neighbors_upper=2,
+    metric='cosine',
+    pool_factor=5
+)
 
 vs.build_vectorstore(doc_list)
 
----
-
-### 4. Querying the VectorStore
-
-query = {'vector': [0.2, 0.1, 0.3]}
-neighbors = vs.find_neighbors(query, k=5)
-
----
-
-### 5. Inspecting Results
+query = {'vector': [0.95, 0.05]}
+neighbors = vs.find_neighbors(query, k=2)
 
 for node, score in neighbors:
-    print(node.id, score, node.data)
+    print(node.id, node.data, score)
+```
 
 ---
 
-### 6. Incremental Insertion
+## 10. Notes and limitations
 
-vs.add_single_node({'vector': [0.3, 0.2, 0.1], 'data': "new point"})
+This package is best viewed as an educational and experimental ANN implementation rather than a fully optimized library.
 
-(Only valid after initial build)
+A few things to keep in mind:
+
+- top-layer construction uses explicit pairwise computations, so it is not tuned for massive-scale production use
+- performance is shaped strongly by `pool_factor`, `neighbors_bottom`, `neighbors_upper`, and `exp_level`
+- because the implementation is meant to be understandable, some parts favor clarity over micro-optimization
+
+That said, these same features make it a good project for demonstrating ANN concepts and for running controlled experiments on recall, inflation, build time, and search time.
