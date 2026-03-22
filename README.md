@@ -468,3 +468,61 @@ A few things to keep in mind:
 - performance is shaped strongly by `pool_factor`, `neighbors_bottom`, `neighbors_upper`, and `exp_level`
 - because the implementation is meant to be understandable, some parts favor clarity over micro-optimization
 
+# Test Suites
+
+The project includes two parallel test suites: one for **cosine similarity** and one for **Euclidean distance**. The two scripts are structurally the same, differing mainly in the metric used and in the way synthetic data are generated. The cosine version builds normalized cluster data on the unit sphere, while the Euclidean version uses an analogous setup in ordinary Euclidean space.
+
+Each test suite is designed to study how the `VectorStore` behaves as several important parameters vary:
+
+- **dimension** (`dim`)
+- **dataset size**
+- **expected layer height** (`exp_level`)
+- **search breadth** (`pool_factor`)
+- **cluster separation**
+
+For each experimental condition, the script generates synthetic clustered data, builds a vector store, and compares ANN search against a brute-force baseline.
+
+## Data generation
+
+In the cosine test suite, the data consist of three Gaussian clusters whose centers lie at controlled angular separations. The three regimes are:
+
+- `wide_clusters`
+- `moderate_clusters`
+- `close_clusters`
+
+This makes it possible to test the ANN structure under increasingly difficult retrieval settings. Queries are generated from several locations distributed around and between the cluster centers, so the benchmark is not limited to only easy “near-center” queries.
+
+## What is measured
+
+For each parameter combination, the test suite records three main quantities:
+
+- **build time**: time required to construct the vector store
+- **brute-force query time**: average time for exact nearest-neighbor retrieval
+- **ANN retrieval statistics**:
+  - **recall**: fraction of true top-`k` neighbors recovered
+  - **inflation**: ratio comparing brute-force average neighbor quality to ANN average neighbor quality
+  - **query time**: average ANN search time
+
+Together, these measurements show the central ANN tradeoff: faster query performance than brute force, at the cost of returning approximate rather than exact neighbors.
+
+## Parameters explored
+
+The cosine and Euclidean test suites both vary:
+
+- dimensions from 5 up to 100
+- dataset sizes from 30,000 up to 120,000 total points
+- several values of `exp_level`
+- several values of `pool_factor`
+
+This allows the experiments to probe how search quality and runtime change as the graph becomes taller, denser, or more aggressively searched.
+
+### Why these tests matter
+
+These test suites were designed not just to confirm that the implementation runs, but to investigate how its design choices affect behavior. In particular, they make it possible to study:
+
+- how increasing `pool_factor` improves recall while increasing search cost
+- how `exp_level` affects graph structure and retrieval quality
+- how performance changes with dimension and dataset size
+- how much more difficult retrieval becomes as clusters move closer together
+
+The Euclidean test suite mirrors the cosine test suite so that the same general conclusions can be compared across the two supported metrics.
