@@ -2,7 +2,17 @@
 
 ## Overview
 
-This project implements a prototype **Approximate Nearest Neighbor (ANN)** data structure using a **layered graph**. The design is clearly inspired by hierarchical graph-based ANN methods such as HNSW, but the goal here is not to build a production-grade library. Instead, the point is to show understanding of the main ANN ideas and to provide a readable implementation that can be tested, modified, and studied.
+This project implements a prototype **Approximate Nearest Neighbor (ANN)** data structure using a **layered graph**. The design is clearly inspired by hierarchical graph-based ANN methods such as HNSW, but the goal here is not to build a production-grade library.  Instead, this project is intended as a conceptual and experimental ANN implementation, suitable for study, benchmarking, and extension. 
+
+## Key Features
+
+- Layered graph ANN structure with geometric level assignment
+- Supports cosine similarity and Euclidean distance
+- Tunable search quality via `pool_factor`
+- Separate neighbor budgets for upper and base layers
+- Batch construction and incremental insertion
+- Explicit component detection and MST-based reconnection
+- Clean, readable implementation for experimentation
 
 In particular, the project is meant to demonstrate:
 
@@ -11,7 +21,7 @@ In particular, the project is meant to demonstrate:
 - how design choices affect the tradeoff between speed and recall
 - how one might keep a graph navigable even when disconnected components appear during construction
 
-The code supports both **cosine similarity** and **Euclidean distance**, allows **batch construction** and **incremental insertion**, and includes explicit machinery for **component analysis and reconnection**.
+The code supports both **cosine similarity** and **Euclidean distance**, allows **batch construction** and **incremental insertion**, and includes explicit machinery for **component analysis and reconnection**. 
 
 ---
 
@@ -62,11 +72,9 @@ The implementation supports two metrics:
 Internally, both are handled through a common interface:
 
 - cosine uses the normalized dot product
-- Euclidean distance is converted into a similarity score by storing `-||x-y||`
+- Euclidean distance is internally converted into a similarity score by storing `-||x - y||`, allowing the search logic to treat all metrics uniformly as “maximize similarity”
 
 This allows the search code to always treat “larger is better.” A corresponding `metric_multiplier` is then used when returning final results so that Euclidean values are reported back in ordinary positive distance units.
-
-This is a nice design choice because the traversal logic stays uniform across metrics.
 
 ---
 
@@ -84,7 +92,7 @@ That top-layer construction does several important things:
 
 The entry-point selection is especially important. Rather than forcing a single global entry node, the code chooses **medoid-like representatives** from each top-layer component. If additional entry points are allowed, it spreads them across components in a way that promotes coverage.
 
-This gives the search routine multiple starting points and makes it more robust, especially when the top layer is not fully connected.
+This gives the search routine multiple starting points and makes it more robust.
 
 ---
 
@@ -95,7 +103,7 @@ The graph uses separate neighbor budgets for the bottom layer and upper layers:
 - `neighbors_bottom`: target degree at layer 0
 - `neighbors_upper`: target degree at layers above 0
 
-This is a sensible ANN design choice:
+This is design choise is motivated by:
 
 - the bottom layer is where final refinement happens, so it benefits from a larger neighborhood
 - upper layers are mainly for navigation, so they can remain sparser
@@ -126,7 +134,7 @@ So `pool_factor` governs a major tradeoff:
 - larger `pool_factor` -> more exploration, potentially better graph quality and better recall, but higher build/search cost
 - smaller `pool_factor` -> faster operations, but a greater chance of missing strong neighbors
 
-The same idea appears again during query-time search at layer 0, where the algorithm expands a candidate set of size approximately `k * pool_factor`.
+The same idea appears again during query-time search at layer 0, where the algorithm expands a candidate set of size approximately `k * pool_factor`.  In ANN terminology, this controls the breadth of the local search frontier.  
 
 If you are benchmarking this project, `pool_factor` is one of the main knobs worth studying.
 
@@ -140,7 +148,13 @@ The intended primary workflow is batch construction via:
 build_vectorstore(doc_list)
 ```
 
-This method first converts the raw documents into `VectorNode` objects and then calls `build_from_VectorNodeList`.
+The individual elements of doclist must be Python dictionaries of the form 
+
+```python
+{'vector':vec, 'data':data, 'source':source}
+```
+
+where the value associated to ```'vector'``` must be a numpy vector.  The value associate to ```'data'``` is the raw data producing the vector.   The ```'source'``` value is optional.  The method first converts the raw documents into `VectorNode` objects and then calls `build_from_VectorNodeList`.
 
 The batch build process is roughly:
 
@@ -148,7 +162,7 @@ The batch build process is roughly:
 2. determine the highest occupied layer
 3. build the top layer
 4. descend layer by layer, adding new nodes at each layer
-5. analyze connected components on every layer
+5. analyze connected components on every layer (using a Kruskal-style MST procedure)
 6. reconnect disconnected components afterward
 
 This top-down build is important because each lower layer inherits the graph from the layer above, and then newly eligible nodes are inserted into that layer.
@@ -172,7 +186,7 @@ This method:
 - connects the node to selected neighbors
 - possibly updates those neighbors’ adjacency lists
 
-This provides a dynamic-update path, though the most natural mode for experimentation is still batch construction.
+This provides a dynamic-update path, though the most natural mode for experimentation is still batch construction.  Single entry does not guarantee the resulting structure is optimized as in the batch building process.  If a significant number of new nodes are added, rebuilding the vectorstore is recommended.
 
 ---
 
@@ -454,4 +468,3 @@ A few things to keep in mind:
 - performance is shaped strongly by `pool_factor`, `neighbors_bottom`, `neighbors_upper`, and `exp_level`
 - because the implementation is meant to be understandable, some parts favor clarity over micro-optimization
 
-That said, these same features make it a good project for demonstrating ANN concepts and for running controlled experiments on recall, inflation, build time, and search time.
