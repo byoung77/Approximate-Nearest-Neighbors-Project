@@ -582,3 +582,38 @@ As expected, increasing `pool_factor` improves recall and reduces average metric
 This figure isolates the effect of `exp_level` on recall and metric inflation.
 
 </details>
+
+### Euclidean Distance
+
+#### Build Time
+
+![Euclidean build times](Images/Figure_BuildTimes_Euclidean.png)
+
+Build times for the Euclidean metric follow trends similar to the cosine case. Construction cost increases with dataset size and with `exp_level`, reflecting the additional work required to build deeper hierarchical structures. The dependence on cluster separation is minimal, as expected, since construction is driven primarily by graph connectivity rather than query difficulty.
+
+#### Retrieval Time and Speedup
+
+![Euclidean retrieval speedup](Images/Figure_Retrieval_Speedup_Euclidean.png)
+
+![Euclidean retrieval times](Images/Figure_Retrieval_Times_Euclidean.png)
+
+ANN retrieval remains significantly faster than brute-force search across all tested configurations. As with cosine similarity, the speedup increases with dataset size, highlighting the scalability advantage of the layered graph approach. Retrieval times are relatively stable across dimensions, indicating that the graph-based search effectively mitigates the curse of dimensionality in terms of runtime.
+
+#### Recall and Metric Inflation
+
+![Euclidean retrieval statistics](Images/Figure_RetrieveStats_Euclidean.png)
+
+The same qualitative tradeoffs observed in the cosine setting appear here as well. Increasing `pool_factor` improves recall and reduces metric inflation, at the cost of increased search effort. As cluster separation decreases, retrieval becomes more difficult, leading to lower recall and higher inflation.
+
+Compared to cosine similarity, Euclidean distance tends to produce slightly more uniform behavior across dimensions, though higher-dimensional settings still present a greater challenge for accurate retrieval.
+
+<details>
+<summary>Additional Euclidean-distance figures</summary>
+
+#### Effect of `exp_level`
+
+![Euclidean exp level retrieval statistics](Images/Figure_RetrieveStats_explevel_Euclidean.png)
+
+This figure isolates the effect of `exp_level` on recall and metric inflation. Larger values of `exp_level` generally improve navigability of the graph, though the gains are modest compared to increasing `pool_factor`, and come at a higher construction cost.
+
+</details>
