@@ -526,3 +526,59 @@ These test suites were designed not just to confirm that the implementation runs
 - how much more difficult retrieval becomes as clusters move closer together
 
 The Euclidean test suite mirrors the cosine test suite so that the same general conclusions can be compared across the two supported metrics.
+
+## Experimental Results
+
+Two parallel test suites were run: one using **cosine similarity** and one using **Euclidean distance**. In each case, synthetic clustered data were generated under three separation regimes:
+
+- well-separated clusters
+- moderately separated clusters
+- overlapping clusters
+
+The experiments varied:
+
+- dataset size
+- ambient dimension
+- expected graph height (`exp_level`)
+- search breadth (`pool_factor`)
+
+For each parameter setting, ANN retrieval was compared against brute-force nearest-neighbor search. The main quantities recorded were:
+
+- build time
+- average retrieval time
+- speedup relative to brute force
+- recall
+- average metric inflation
+
+### Cosine Similarity
+
+#### Build Time
+
+![Cosine build times](Images/Figure_BuildTimes_Cosine.png)
+
+Build time increases steadily with dataset size and also increases with `exp_level`, since taller hierarchies require more graph structure to be constructed.
+
+#### Retrieval Time and Speedup
+
+![Cosine retrieval speedup](Images/Figure_Retrieval_Speedup_Cosine.png)
+
+![Cosine retrieval times](Images/Figure_Retrieval_Times_Cosine.png)
+
+ANN retrieval is consistently much faster than brute force across all tested dimensions and cluster regimes. The observed speedups generally increase with dataset size.
+
+#### Recall and Metric Inflation
+
+![Cosine retrieval statistics](Images/Figure_RetrieveStats_Cosine.png)
+
+As expected, increasing `pool_factor` improves recall and reduces average metric inflation, though at the cost of broader search. Lower-dimensional data were noticeably easier for this ANN structure, while higher-dimensional settings remained more challenging.
+
+<details>
+<summary>Additional cosine-similarity figures</summary>
+
+#### Effect of `exp_level`
+
+![Cosine exp level retrieval statistics](Images/Figure_RetrieveStats_explevel_Cosine.png)
+
+This figure isolates the effect of `exp_level` on recall and metric inflation.
+
+</details>
